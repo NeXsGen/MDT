@@ -1,0 +1,183 @@
+<job id="MDTRunWithServiceUI">
+   <script language="VBScript" src="ZTIUtility.vbs"/>
+   <script language="VBScript">
+
+' //***************************************************************************
+' //
+' // Solution:  Custom script for the Microsoft Deployment Toolkit
+' //
+' // File:      MDTRunWithServiceUI.wsf
+' //
+' // Purpose:   Display a program during a ConfigMgr task sequence
+' //
+' // Usage:     cscript MDTRunWithServiceUI.wsf 
+' //                    /UIExePath:"<path to executable>"
+' //                    [/UIExeParam:"<parameter to pass to executable>"] 
+' //                    [/UIExeTitle:"<window title to activate>"]
+' //                    [/debug:true]
+' //
+' //            - The /UIExeTitle switch does not currently succesfully activate the
+' //                custom UI (make it the topmost window).  Specifying this switch
+' //                does no harm but does not accomplish its intended purpose as is.
+' //
+' // Version:   1.0.3
+' //
+' // Revisions:
+' // 1.0.0  10/23/2014  MM  Created initial script.
+' // 1.0.1  10/23/2014  MM  Calling AppActive from this script will not see the window.
+' //                        Instead now creating and launching a separate VBS with ServiceUI
+' //                        to activate the window so that it sees the same desktop.
+' // 1.0.2  10/23/2014  MM  (Version discarded.)
+' // 1.0.3  10/23/2014  MM  Added logging for activate VBS execution.
+' //
+' //***************************************************************************
+
+
+'Option Explicit
+RunNewInstance
+
+
+'//----------------------------------------------------------------------------
+'//  Main Class
+'//----------------------------------------------------------------------------
+
+Class MDTRunWithServiceUI
+
+	'//----------------------------------------------------------------------------
+	'//  Global constant and variable declarations
+	'//----------------------------------------------------------------------------
+
+	Dim iRetVal
+
+	
+	'//----------------------------------------------------------------------------
+	'//  Main routine
+	'//----------------------------------------------------------------------------
+
+	Function Main
+	
+		On Error Resume Next
+
+		iRetVal = Success
+
+
+		' Get the executable path
+
+		If oUtility.Arguments.Exists("UIExePath") then
+			sUIExePath = oUtility.Arguments("UIExePath")
+			oLogging.CreateEntry "UIExePath argument: " & sUIExePath, LogTypeInfo
+		Else
+			oLogging.CreateEntry "UIExePath argument not found.  Exiting script.", LogTypeError
+            oLogging.ReportFailure "UIExePath argument not found.  Exiting script.", 10401
+		End if
+
+
+		' Get the executable parameter
+
+		If oUtility.Arguments.Exists("UIExeParam") then
+			sUIExeParam = oUtility.Arguments("UIExeParam")
+			oLogging.CreateEntry "UIExeParam argument: " & sUIExeParam, LogTypeInfo
+		End if
+
+
+		' Get the window title
+
+		If oUtility.Arguments.Exists("UIExeTitle") then
+			sUIExeTitle = oUtility.Arguments("UIExeTitle")
+			oLogging.CreateEntry "UIExeTitle argument: " & sUIExeTitle, LogTypeInfo
+		End if
+
+
+		' Figure out what process to use
+
+		sProcessName = "explorer.exe"
+		Set oProcesses = objWMI.ExecQuery("select * from Win32_Process where Name='tsprogressui.exe'")
+		For each oProcess in oProcesses
+			sProcessName = "tsprogressui.exe"
+		Next
+		oLogging.CreateEntry "Using " & sProcessName & " for displaying UI", LogTypeInfo
+
+
+		' Set the working directory
+
+		'If oEnvironment.Item("OSVersion") = "WinPE" then
+		If UCase(oEnv("PROCESSOR_ARCHITECTURE")) = "AMD64" then
+			sWorkingDir = oEnvironment.Substitute("%DEPLOYROOT%\Tools\x64")
+		Else
+			sWorkingDir = oEnvironment.Substitute("%DEPLOYROOT%\Tools\x86")
+		End if
+		oLogging.CreateEntry "Working directory: " & sWorkingDir, LogTypeInfo
+		oShell.CurrentDirectory = sWorkingDir
+
+
+		' Hide the progress UI
+
+		On Error Resume Next
+		Set oTSProgressUI = CreateObject("Microsoft.SMS.TSProgressUI") 
+		oTSProgressUI.CloseProgressDialog 
+		Set oTSProgressUI = Nothing 
+		On Error Goto 0
+
+
+        ' Create and launch script to activate the app if window title was provided
+
+        If sUIExeTitle <> "" Then
+            oLogging.CreateEntry "Creating and launching script to activate window: " & sUIExeTitle, LogTypeInfo
+            Set oActivateScript = oFso.CreateTextFile(oEnv("TEMP") & "\ActivateUI.vbs", True, True)
+            oActivateScript.WriteLine "On Error Resume Next"
+            oActivateScript.WriteLine "Set oShell = CreateObject(" & chr(34) & "WScript.Shell" & chr(34) & ")"
+            oActivateScript.WriteLine "While oShell.AppActivate(" & chr(34) & sUIExeTitle & chr(34) & ") = FALSE"
+            oActivateScript.WriteLine "    WScript.Sleep 1000"
+            oActivateScript.WriteLine "Wend"
+            oActivateScript.Close
+
+			sActivateCmd = "ServiceUI.exe -process:" & sProcessName & " """ & oEnv("WINDIR") & "\system32\wscript.exe"" """ & oEnv("TEMP") & "\ActivateUI.vbs"""
+            oLogging.CreateEntry "About to run command: " & sActivateCmd, LogTypeInfo
+			Err.Clear
+			iActivateRetVal = oShell.Run(sActivateCmd, 0, False)
+            If Err then
+                iActivateRetVal = Err.Number
+                oLogging.CreateEntry "ERROR executing command " & sActivateCmd & ": " & Err.Description & " (" & Err.Number & ")", LogTypeError
+            ElseIf iActivateRetVal = 0 then
+                oLogging.CreateEntry "Successfully executed command " & sActivateCmd & ", rc = " & CStr(iActivateRetVal), LogTypeInfo
+            Else
+                TestAndLog iActivateRetVal, "Non-zero return code executing command " & sActivateCmd & ", rc = " & iRetVal
+            End if
+        End If
+
+
+        ' Build the command line
+
+        If sUIExeParam = "" Then
+            sCmd = "ServiceUI.exe -process:" & sProcessName & " """ & sUIExePath & """"
+        Else
+            sCmd = "ServiceUI.exe -process:" & sProcessName & " """ & sUIExePath & """ " & """" & sUIExeParam & """"
+        End If
+
+
+        ' Exe Execution
+
+        oLogging.CreateEntry "About to run command: " & sCmd, LogTypeInfo
+
+        Err.Clear
+        iRetVal = oShell.Run(sCmd, 0, true)
+        If Err then
+            iRetVal = Err.Number
+            oLogging.CreateEntry "ERROR executing command " & sCmd & ": " & Err.Description & " (" & Err.Number & ")", LogTypeError
+        ElseIf iRetVal = 0 then
+            oLogging.CreateEntry "Successfully executed command " & sCmd & ", rc = " & CStr(iRetVal), LogTypeInfo
+        Else
+            TestAndLog iRetVal, "Non-zero return code executing command " & sCmd & ", rc = " & iRetVal
+        End if
+
+
+		' Exit with whatever return value was returned by the exe
+
+		Main = iRetVal
+
+	End Function
+
+End Class
+
+   </script>
+</job>
